@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">mfa simple</string>
+
+    <!-- Biometric prompt -->
+    <string name="biometric_title">Biometric Authentication</string>
+    <string name="biometric_subtitle">Use your fingerprint or device authentication</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Status text -->
+    <string name="status_template">Status: %1$s</string>
+</resources>
