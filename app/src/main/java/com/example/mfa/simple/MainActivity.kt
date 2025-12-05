@@ -200,12 +200,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectToDevice(device: BluetoothDevice) {
-        updateStatus("Connecting to ${device.name}...")
-        
+        // Safely obtain device name respecting BLUETOOTH_CONNECT permission on Android 12+
+        val deviceName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                device.name ?: "Bluetooth device"
+            } else {
+                "Bluetooth device"
+            }
+        } else {
+            device.name ?: "Bluetooth device"
+        }
+
+        updateStatus("Connecting to $deviceName...")
+
         Thread {
+            var socket: BluetoothSocket? = null
             try {
-                val socket = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                socket = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    if (ContextCompat.checkSelfPermission(
+                            this,
+                            Manifest.permission.BLUETOOTH_CONNECT
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
                         device.createRfcommSocketToServiceRecord(hc05Uuid)
                     } else {
                         null
@@ -219,9 +237,9 @@ class MainActivity : AppCompatActivity() {
                     socket.connect()
                     bluetoothSocket = socket
                     connectedDevice = device
-                    
+
                     runOnUiThread {
-                        updateStatus("Connected to ${device.name}")
+                        updateStatus("Connected to $deviceName")
                         btnConnectBT.isEnabled = false
                     }
                 }
@@ -230,7 +248,7 @@ class MainActivity : AppCompatActivity() {
                     updateStatus("Connection failed: ${e.message}")
                 }
                 try {
-                    bluetoothSocket?.close()
+                    socket?.close()
                 } catch (_: IOException) {
                     // Ignore
                 }
@@ -305,9 +323,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Capture current system time in milliseconds since Unix epoch
+        val currentTimestamp = System.currentTimeMillis()
+        val currentAuthMethod = authMethod
+        
         val jsonData = mapOf(
-            "auth" to authMethod,
-            "timestamp" to System.currentTimeMillis()
+            "auth" to currentAuthMethod,
+            "timestamp" to currentTimestamp
         )
 
         val jsonString = gson.toJson(jsonData)
@@ -316,12 +338,14 @@ class MainActivity : AppCompatActivity() {
             try {
                 val outputStream: OutputStream? = bluetoothSocket?.outputStream
                 if (outputStream != null) {
+                    // Send only the JSON string
                     outputStream.write(jsonString.toByteArray())
                     outputStream.flush()
                     
+                    // Show success message
                     runOnUiThread {
-                        updateStatus("JSON sent: $jsonString")
-                        Toast.makeText(this, "Data sent successfully", Toast.LENGTH_SHORT).show()
+                        updateStatus("Data successfully sent")
+                        Toast.makeText(this, "Data successfully sent", Toast.LENGTH_SHORT).show()
                     }
                 } else {
                     runOnUiThread {
