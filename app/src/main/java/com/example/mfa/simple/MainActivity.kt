@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var promptInfo: BiometricPrompt.PromptInfo
 
     private val gson = Gson()
+    private val encryptionHelper = EncryptionHelper
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -338,14 +339,43 @@ class MainActivity : AppCompatActivity() {
             try {
                 val outputStream: OutputStream? = bluetoothSocket?.outputStream
                 if (outputStream != null) {
-                    // Send only the JSON string
-                    outputStream.write(jsonString.toByteArray())
+                    // Шифрование JSON с использованием ChaCha20
+                    val encrypted = encryptionHelper.encryptJson(jsonString)
+                    
+                    // Логируем для отладки
+                    android.util.Log.d("MainActivity", "Sending encrypted data: size=${encrypted.size}, first byte=0x${String.format("%02X", encrypted[0].toInt() and 0xFF)}")
+                    android.util.Log.d("MainActivity", "Original JSON: $jsonString")
+                    
+                    // Отправляем зашифрованные данные
+                    outputStream.write(encrypted)
                     outputStream.flush()
+                    
+                    android.util.Log.d("MainActivity", "Data sent successfully")
+                    
+                    // Выполняем сравнение алгоритмов с 20 тестами (в фоне, для логирования)
+                    runOnUiThread {
+                        updateStatus("Running algorithm comparison (20 tests)...")
+                    }
+                    
+                    val statisticsReport = EncryptionHelper.getDetailedStatisticsReport(jsonString, testCount = 20)
+                    val statistics = EncryptionHelper.compareAlgorithmsWithStatistics(jsonString, testCount = 20)
                     
                     // Show success message
                     runOnUiThread {
-                        updateStatus("Data successfully sent")
-                        Toast.makeText(this, "Data successfully sent", Toast.LENGTH_SHORT).show()
+                        val fastestAlgorithm = statistics.filter { (_, stats) -> stats.successCount > 0 }
+                            .minByOrNull { (_, stats) -> stats.averageTime }
+                        val fastestName = fastestAlgorithm?.key ?: "N/A"
+                        val fastestTime = if (fastestAlgorithm != null) {
+                            String.format("%.2f", fastestAlgorithm.value.averageTime)
+                        } else {
+                            "N/A"
+                        }
+                        
+                        updateStatus("Data sent. Fastest: $fastestName (avg: ${fastestTime}ms)")
+                        Toast.makeText(this, "Encrypted data sent", Toast.LENGTH_SHORT).show()
+                        
+                        // Логируем результаты сравнения (можно вывести в Logcat)
+                        android.util.Log.d("EncryptionHelper", statisticsReport)
                     }
                 } else {
                     runOnUiThread {
@@ -355,6 +385,13 @@ class MainActivity : AppCompatActivity() {
             } catch (e: IOException) {
                 runOnUiThread {
                     updateStatus("Send failed: ${e.message}")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Encryption/transmission error", e)
+                runOnUiThread {
+                    val errorMsg = e.message ?: "Unknown error"
+                    updateStatus("Error: $errorMsg")
+                    Toast.makeText(this, "Error: $errorMsg", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
