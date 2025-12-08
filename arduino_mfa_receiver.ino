@@ -7,6 +7,7 @@
 #include <SoftwareSerial.h>
 #include <ArduinoJson.h>
 #include <math.h>
+#include <string.h>  // Для memcpy
 
 // SoftwareSerial для HC-05 Bluetooth модуля
 // ВАРИАНТ 1: Стандартное подключение
@@ -48,9 +49,23 @@ const float w1 = 0.4;
 const float w2 = 0.3;
 const float w3 = 0.3;
 
-String receivedBuffer = "";
+// Буфер для приема зашифрованных данных
+uint8_t encryptedBuffer[256];
+int encryptedBufferIndex = 0;
+bool receivingEncrypted = false;
 unsigned long lastCharTime = 0;
-const unsigned long DATA_TIMEOUT = 100; // Таймаут 100ms
+const unsigned long DATA_TIMEOUT = 1000; // Таймаут увеличен до 1000ms для надежного приема
+
+// Ключ шифрования (должен совпадать с ключом в Android приложении)
+// ВАЖНО: В продакшене ключ должен быть безопасно обменен между устройствами
+const int AES_KEY_SIZE = 16;
+uint8_t encryptionKey[AES_KEY_SIZE] = {
+  0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+  0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+};
+
+// Буфер для дешифрованных данных
+char decryptedBuffer[256];
 
 // Вспомогательная функция для вычисления log2
 float log2_func(float x) {
@@ -81,6 +96,11 @@ void setup() {
     BTSerial.read();
   }
   
+  // Очищаем encryptedBuffer
+  memset(encryptedBuffer, 0, sizeof(encryptedBuffer));
+  encryptedBufferIndex = 0;
+  receivingEncrypted = false;
+  
   Serial.println("MFA Receiver Ready");
   Serial.println("Waiting for authentication data...");
   Serial.println("Initial State: q0");
@@ -88,39 +108,50 @@ void setup() {
 }
 
 void loop() {
-  // Читаем данные из Bluetooth через SoftwareSerial
+  // Читаем зашифрованные байты из Bluetooth через SoftwareSerial
   while (BTSerial.available() > 0) {
-    char inChar = (char)BTSerial.read();
+    uint8_t byteData = BTSerial.read();
     
-    // Пропускаем символы новой строки и возврата каретки
-    if (inChar == '\n' || inChar == '\r') {
-      // Если получили символ новой строки и есть данные в буфере, обрабатываем сразу
-      if (receivedBuffer.length() > 0) {
-        String dataToProcess = receivedBuffer;
-        receivedBuffer = "";
-        processReceivedData(dataToProcess);
-      }
-      continue;
+    // Если буфер пуст и мы начинаем прием
+    if (encryptedBufferIndex == 0) {
+      receivingEncrypted = true;
     }
     
-    receivedBuffer += inChar;
-    lastCharTime = millis();
-    updateRSSISample();
+    // Сохраняем байт в буфер
+    if (encryptedBufferIndex < sizeof(encryptedBuffer)) {
+      encryptedBuffer[encryptedBufferIndex++] = byteData;
+      lastCharTime = millis();
+      updateRSSISample();
+    } else {
+      // Буфер переполнен, сбрасываем
+      Serial.println("ERROR: Encrypted buffer overflow");
+      encryptedBufferIndex = 0;
+      receivingEncrypted = false;
+    }
   }
   
-  // Обрабатываем данные после таймаута (если нет символа новой строки)
-  if (receivedBuffer.length() > 0 && (millis() - lastCharTime) > DATA_TIMEOUT) {
-    String dataToProcess = receivedBuffer;
-    receivedBuffer = "";
+  // Обрабатываем зашифрованные данные после таймаута
+  if (receivingEncrypted && encryptedBufferIndex > 0 && (millis() - lastCharTime) > DATA_TIMEOUT) {
+    int dataSize = encryptedBufferIndex;
+    
+    // Проверяем минимальный размер (1 байт типа + 16 байт IV + минимум 1 байт данных = 18 байт)
+    const int MIN_DATA_SIZE = 18;
+    if (dataSize < MIN_DATA_SIZE) {
+      // Сбрасываем буфер и ждем следующий пакет
+      encryptedBufferIndex = 0;
+      receivingEncrypted = false;
+      lastCharTime = 0;
+      return;
+    }
+    
+    // Дешифруем и обрабатываем
+    processEncryptedData(encryptedBuffer, dataSize);
+    
+    // Сбрасываем буфер
+    encryptedBufferIndex = 0;
+    receivingEncrypted = false;
     lastCharTime = 0;
-    
-    // Обрабатываем только если есть данные и это похоже на JSON
-    if (dataToProcess.length() > 0 && (dataToProcess.indexOf('{') != -1)) {
-      processReceivedData(dataToProcess);
-    }
   }
-  
-  // Убрали периодическую проверку, чтобы не засорять вывод
 }
 
 void updateRSSISample() {
@@ -132,6 +163,83 @@ void updateRSSISample() {
   }
 }
 
+/**
+ * Дешифровка и обработка данных (AES-128 упрощенный XOR)
+ * @param encryptedData Зашифрованные данные: [тип] + IV + encrypted
+ * @param dataSize Размер данных
+ */
+void processEncryptedData(uint8_t* encryptedData, int dataSize) {
+  if (dataSize < 2) {
+    return;
+  }
+  
+  // Первый байт - тип шифрования: 0x01 = ChaCha20, 0x02 = AES-128
+  uint8_t encryptionType = encryptedData[0];
+  
+  Serial.print("Encryption type: 0x");
+  Serial.print(encryptionType, HEX);
+  Serial.print(", Data size: ");
+  Serial.println(dataSize);
+  
+  String decryptedJson = "";
+  
+  if (encryptionType == 0x02) {
+    // AES-128 (упрощенный XOR)
+    const int AES_IV_SIZE = 16;
+    if (dataSize < 1 + AES_IV_SIZE) {
+      totalSessions++;
+      return;
+    }
+    
+    uint8_t iv[AES_IV_SIZE];
+    memcpy(iv, encryptedData + 1, AES_IV_SIZE);
+    int encryptedSize = dataSize - 1 - AES_IV_SIZE;
+    uint8_t* encrypted = encryptedData + 1 + AES_IV_SIZE;
+    
+    decryptedJson = decryptAES128(encrypted, encryptedSize, iv);
+  } else {
+    totalSessions++;
+    return;
+  }
+  
+  if (decryptedJson.length() > 0) {
+    Serial.print("Decrypted JSON: ");
+    Serial.println(decryptedJson);
+    Serial.print("Decrypted JSON length: ");
+    Serial.println(decryptedJson.length());
+    processReceivedData(decryptedJson);
+  } else {
+    Serial.println("ERROR: decryptedJson is empty");
+    totalSessions++;
+  }
+}
+
+/**
+ * Дешифровка AES-128 (упрощенная версия для совместимости)
+ * ВАЖНО: Настоящий AES-128 требует библиотеку или полную реализацию
+ * Эта упрощенная версия работает только с упрощенным шифрованием
+ */
+String decryptAES128(uint8_t* encrypted, int encryptedSize, uint8_t* iv) {
+  // Проверка размера
+  if (encryptedSize <= 0 || encryptedSize > sizeof(decryptedBuffer) - 1) {
+    return "";
+  }
+  
+  // Упрощенная дешифровка для совместимости
+  // Простой XOR с ключом (совместимо с упрощенным режимом Android)
+  for (int i = 0; i < encryptedSize && i < sizeof(decryptedBuffer) - 1; i++) {
+    decryptedBuffer[i] = encrypted[i] ^ encryptionKey[i % AES_KEY_SIZE];
+  }
+  decryptedBuffer[encryptedSize] = '\0';
+  
+  // Проверяем результат
+  if (decryptedBuffer[0] == '{' && decryptedBuffer[encryptedSize - 1] == '}') {
+    return String(decryptedBuffer);
+  }
+  
+  return "";
+}
+
 void processReceivedData(String data) {
   // Удаляем пробелы и символы новой строки
   data.trim();
@@ -141,19 +249,20 @@ void processReceivedData(String data) {
     return;
   }
   
+  // ПРОСТОЕ РЕШЕНИЕ: Если данные уже являются валидным JSON (начинаются с '{' и заканчиваются '}'),
+  // обрабатываем их напрямую без сложного парсинга
+  if (data.charAt(0) == '{' && data.charAt(data.length() - 1) == '}') {
+    processJSON(data);
+    return;
+  }
+  
   // Обрабатываем все JSON объекты в буфере (могут быть склеены)
   int startPos = 0;
-  int processedCount = 0;
   
   while (startPos < data.length()) {
     // Ищем начало JSON объекта
     int jsonStart = data.indexOf('{', startPos);
     if (jsonStart == -1) {
-      // Если нет открывающей скобки, но есть данные - возможно поврежденные данные
-      if (processedCount == 0 && data.length() > 5) {
-        Serial.print("WARNING: No '{' found in data: ");
-        Serial.println(data);
-      }
       break;
     }
     
@@ -174,11 +283,6 @@ void processReceivedData(String data) {
     }
     
     if (jsonEnd == -1) {
-      // Неполный JSON - возможно данные еще приходят
-      if (processedCount == 0) {
-        // Сохраняем неполные данные обратно в буфер для следующей попытки
-        receivedBuffer = data.substring(jsonStart);
-      }
       break;
     }
     
@@ -189,7 +293,6 @@ void processReceivedData(String data) {
     // Обрабатываем этот JSON объект
     if (jsonStr.length() > 0) {
       processJSON(jsonStr);
-      processedCount++;
     }
     
     // Переходим к следующему
@@ -201,39 +304,33 @@ void processJSON(String jsonStr) {
   // Очищаем строку от лишних символов
   jsonStr.trim();
   
-  // Выводим полученные данные
-  Serial.print("Received: ");
-  Serial.println(jsonStr);
-  
   // Выводим сообщение о парсинге
   Serial.print("Parsing JSON: ");
   Serial.println(jsonStr);
   
-  // Парсим JSON
-  DynamicJsonDocument doc(256);
-  DeserializationError error = deserializeJson(doc, jsonStr);
-  
-  if (error) {
-    Serial.print("Parse error: ");
-    Serial.println(error.c_str());
-    totalSessions++;
-    Serial.println();
-    return;
-  }
-  
-  // Получаем тип аутентификации
+  // Парсим JSON без выделения большого буфера (минимальный парсер по подстроке)
+  // Ищем поле "auth"
   String authType = "";
-  
-  if (doc.containsKey("auth")) {
-    if (doc["auth"].is<const char*>()) {
-      authType = String(doc["auth"].as<const char*>());
-    } else if (doc["auth"].is<String>()) {
-      authType = doc["auth"].as<String>();
+  int authPos = jsonStr.indexOf("\"auth\"");
+  if (authPos != -1) {
+    int colonPos = jsonStr.indexOf(':', authPos);
+    if (colonPos != -1) {
+      // Значение сразу после двоеточия в кавычках: "auth":"biometric"
+      int firstQuote = jsonStr.indexOf('\"', colonPos);
+      int secondQuote = jsonStr.indexOf('\"', firstQuote + 1);
+      if (firstQuote != -1 && secondQuote != -1 && secondQuote > firstQuote) {
+        authType = jsonStr.substring(firstQuote + 1, secondQuote);
+      }
     }
   }
   
   // Нормализуем строку (убираем пробелы)
   authType.trim();
+  
+  // Отладочный вывод
+  Serial.print("Auth type detected: '");
+  Serial.print(authType);
+  Serial.println("'");
   
   // Обрабатываем аутентификацию
   if (authType.equals("biometric")) {
@@ -253,7 +350,6 @@ void processJSON(String jsonStr) {
     Serial.print(authType);
     Serial.println("'");
     totalSessions++;
-    Serial.println();
     return;
   }
   
@@ -366,6 +462,15 @@ void printMetrics() {
   float bsss = calculateBSSS();
   float imsi = calculateIMSI(d_ec, bsss);
   
+  // Вычисляем средний RSSI
+  float avgRSSI = 0.0;
+  if (rssiInitialized) {
+    for (int i = 0; i < RSSI_SAMPLE_SIZE; i++) {
+      avgRSSI += rssiSamples[i];
+    }
+    avgRSSI /= RSSI_SAMPLE_SIZE;
+  }
+  
   Serial.print("State: ");
   Serial.print(stateName);
   Serial.print(", D_EC: ");
@@ -373,5 +478,21 @@ void printMetrics() {
   Serial.print(", BSSS: ");
   Serial.print(bsss, 2);
   Serial.print(", IMSI: ");
-  Serial.println(imsi, 2);
+  Serial.print(imsi, 2);
+  Serial.print(", RSSI: -");
+  Serial.print(abs(avgRSSI), 1);
+  Serial.println(" dBm");
+  
+  Serial.print("Sessions: ");
+  Serial.print(successfulSessions);
+  Serial.print("/");
+  Serial.print(totalSessions);
+  Serial.print(" (");
+  if (totalSessions > 0) {
+    Serial.print((float)successfulSessions / totalSessions * 100.0, 1);
+  } else {
+    Serial.print("0.0");
+  }
+  Serial.print("%), Transitions: ");
+  Serial.println(totalTransitions);
 }

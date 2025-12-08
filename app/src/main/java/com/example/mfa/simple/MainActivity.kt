@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import java.io.IOException
 import java.io.OutputStream
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executor
 
@@ -343,22 +344,60 @@ class MainActivity : AppCompatActivity() {
                     val encrypted = encryptionHelper.encryptJson(jsonString)
                     
                     // Логируем для отладки
-                    android.util.Log.d("MainActivity", "Sending encrypted data: size=${encrypted.size}, first byte=0x${String.format("%02X", encrypted[0].toInt() and 0xFF)}")
+                    val firstByte = encrypted[0].toInt() and 0xFF
+                    android.util.Log.d("MainActivity", "Sending encrypted data: size=${encrypted.size}, first byte=0x${String.format(Locale.US, "%02X", firstByte)}")
                     android.util.Log.d("MainActivity", "Original JSON: $jsonString")
                     
-                    // Отправляем зашифрованные данные
-                    outputStream.write(encrypted)
-                    outputStream.flush()
+                    // Проверяем первый байт перед отправкой
+                    if (firstByte != 0x02) {
+                        android.util.Log.e("MainActivity", "ERROR: First byte should be 0x02, but got: 0x${String.format(Locale.US, "%02X", firstByte)}")
+                    }
                     
-                    android.util.Log.d("MainActivity", "Data sent successfully")
+                    // Логируем первые несколько байтов для отладки
+                    val firstBytes = encrypted.take(5).joinToString(" ") { 
+                        "0x${String.format(Locale.US, "%02X", it.toInt() and 0xFF)}" 
+                    }
+                    android.util.Log.d("MainActivity", "First 5 bytes: $firstBytes")
+                    
+                    // ВАЖНО: Отправляем зашифрованные данные как байты, НЕ как строка!
+                    // encryptJson() возвращает ByteArray, поэтому проверка типа не нужна
+                    try {
+                        // Проверяем, что первый байт действительно 0x02
+                        val firstByteCheck = encrypted[0].toInt() and 0xFF
+                        android.util.Log.d("MainActivity", "Before sending - First byte check: 0x${String.format(Locale.US, "%02X", firstByteCheck)}")
+                        
+                        if (firstByteCheck != 0x02) {
+                            android.util.Log.e("MainActivity", "CRITICAL ERROR: First byte is not 0x02 before sending!")
+                        }
+                        
+                        // Отправляем все байты сразу - используем явный метод write(byteArray)
+                        outputStream.write(encrypted)
+                        outputStream.flush()
+                        
+                        android.util.Log.d("MainActivity", "Data sent successfully: ${encrypted.size} bytes")
+                        
+                        // Дополнительная проверка: логируем первые 10 байтов для отладки
+                        val firstBytes = encrypted.take(10).joinToString(" ") { 
+                            String.format(Locale.US, "%02X", it.toInt() and 0xFF) 
+                        }
+                        android.util.Log.d("MainActivity", "First 10 bytes sent: $firstBytes")
+                    } catch (e: IOException) {
+                        android.util.Log.e("MainActivity", "Error writing to output stream", e)
+                        return@Thread
+                    }
                     
                     // Выполняем сравнение алгоритмов с 20 тестами (в фоне, для логирования)
                     runOnUiThread {
                         updateStatus("Running algorithm comparison (20 tests)...")
                     }
                     
+                    // Выполняем сравнение алгоритмов с 20 тестами (результаты в Logcat)
                     val statisticsReport = EncryptionHelper.getDetailedStatisticsReport(jsonString, testCount = 20)
                     val statistics = EncryptionHelper.compareAlgorithmsWithStatistics(jsonString, testCount = 20)
+                    
+                    // Логируем результаты сравнения в Logcat
+                    android.util.Log.d("MainActivity", "=== Algorithm Performance Comparison (20 tests) ===")
+                    android.util.Log.d("MainActivity", statisticsReport)
                     
                     // Show success message
                     runOnUiThread {
@@ -366,16 +405,13 @@ class MainActivity : AppCompatActivity() {
                             .minByOrNull { (_, stats) -> stats.averageTime }
                         val fastestName = fastestAlgorithm?.key ?: "N/A"
                         val fastestTime = if (fastestAlgorithm != null) {
-                            String.format("%.2f", fastestAlgorithm.value.averageTime)
+                            String.format(Locale.US, "%.2f", fastestAlgorithm.value.averageTime)
                         } else {
                             "N/A"
                         }
                         
                         updateStatus("Data sent. Fastest: $fastestName (avg: ${fastestTime}ms)")
                         Toast.makeText(this, "Encrypted data sent", Toast.LENGTH_SHORT).show()
-                        
-                        // Логируем результаты сравнения (можно вывести в Logcat)
-                        android.util.Log.d("EncryptionHelper", statisticsReport)
                     }
                 } else {
                     runOnUiThread {
