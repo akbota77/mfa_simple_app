@@ -1,23 +1,10 @@
-// Arduino code to receive and parse JSON from Android MFA app
-// ВАЖНО: HC-05 должен быть подключен к SoftwareSerial (пины 10 и 11)
-// HC-05 TX -> Arduino pin 10 (RX)
-// HC-05 RX -> Arduino pin 11 (TX)
-// Serial порт остается свободным для Serial Monitor
-
 #include <SoftwareSerial.h>
 #include <ArduinoJson.h>
 #include <math.h>
 #include <string.h>  // Для memcpy
 
-// SoftwareSerial для HC-05 Bluetooth модуля
-// ВАРИАНТ 1: Стандартное подключение
-// SoftwareSerial BTSerial(10, 11); // RX, TX pins for HC-05
 
-// ВАРИАНТ 2: Если не работает, попробуйте поменять местами TX и RX:
-SoftwareSerial BTSerial(11, 10); // Поменять RX и TX местами
-
-// ВАРИАНТ 3: Если все еще не работает, попробуйте другие пины:
-// SoftwareSerial BTSerial(2, 3); // Альтернативные пины
+SoftwareSerial BTSerial(11, 10); 
 
 // DFA State Machine
 enum State { 
@@ -55,9 +42,6 @@ int encryptedBufferIndex = 0;
 bool receivingEncrypted = false;
 unsigned long lastCharTime = 0;
 const unsigned long DATA_TIMEOUT = 1000; // Таймаут увеличен до 1000ms для надежного приема
-
-// Ключ шифрования (должен совпадать с ключом в Android приложении)
-// ВАЖНО: В продакшене ключ должен быть безопасно обменен между устройствами
 const int AES_KEY_SIZE = 16;
 uint8_t encryptionKey[AES_KEY_SIZE] = {
   0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
